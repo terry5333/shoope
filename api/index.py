@@ -1,122 +1,49 @@
-import os
-import requests
-from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, 
-    FlexSendMessage, BubbleContainer, TextComponent, BoxComponent
-)
-
-app = Flask(__name__)
-
-# 從環境變數取得 Line 密鑰
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
-
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
 def get_shopee_tracking(tracking_no):
-    """ 爬取蝦皮店到店(SPX)物流資訊 """
+    # 這是 spx.tw 專用的 API 節點
     url = "https://spx.tw/api/v2/fleet_order/tracking_search"
-    params = {"sls_tracking_number": tracking_no}
+    
+    # 根據網址分析，主要的參數是這個
+    params = {
+        "sls_tracking_number": tracking_no,
+        "device_id": "line-bot-query" # 模擬設備 ID
+    }
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://spx.tw/"
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Referer": f"https://spx.tw/detail/{tracking_no}",
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest"
     }
     
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=8)
+        # 使用 requests 抓取 JSON
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        
+        # 偵錯用：在 Vercel Logs 可以看到
+        print(f"查詢單號: {tracking_no}, 狀態碼: {response.status_code}")
+        
+        if response.status_code != 200:
+            return {"success": False, "msg": f"❌ 蝦皮伺服器回應錯誤 (代碼: {response.status_code})"}
+            
         data = response.json()
         
+        # 檢查資料層級：data -> tracking_results
         if data.get("data") and data["data"].get("tracking_results"):
-            # 取得最新的一筆狀態
-            latest_status = data["data"]["tracking_results"][0]
+            results = data["data"]["tracking_results"]
+            # 取得最上面的一筆資訊
+            latest = results[0]
+            
             return {
                 "success": True,
-                "status": latest_status.get("status_description", "未知狀態"),
-                "time": latest_status.get("status_time", "未知時間"),
+                "status": latest.get("status_description", "無狀態說明"),
+                "time": latest.get("status_time", "無時間資訊"),
                 "no": tracking_no
             }
-        return {"success": False, "msg": "查無此單號，請檢查輸入是否正確。"}
-    except Exception as e:
-        return {"success": False, "msg": f"查詢失敗，請稍後再試。"}
-
-def create_flex_message(data):
-    """ 產生 Line Flex Message 卡片 """
-    bubble = BubbleContainer(
-        body=BoxComponent(
-            layout='vertical',
-            contents=[
-                TextComponent(text="📦 物流追蹤結果", weight='bold', size='xl', color='#EE4D2D'),
-                BoxComponent(
-                    layout='vertical',
-                    margin='lg',
-                    contents=[
-                        BoxComponent(
-                            layout='baseline',
-                            spacing='sm',
-                            contents=[
-                                TextComponent(text='單號', color='#aaaaaa', size='sm', flex=1),
-                                TextComponent(text=data['no'], wrap=True, color='#666666', size='sm', flex=5)
-                            ]
-                        ),
-                        BoxComponent(
-                            layout='baseline',
-                            spacing='sm',
-                            contents=[
-                                TextComponent(text='狀態', color='#aaaaaa', size='sm', flex=1),
-                                TextComponent(text=data['status'], wrap=True, color='#333333', size='md', flex=5, weight='bold')
-                            ]
-                        ),
-                        BoxComponent(
-                            layout='baseline',
-                            spacing='sm',
-                            contents=[
-                                TextComponent(text='時間', color='#aaaaaa', size='sm', flex=1),
-                                TextComponent(text=data['time'], wrap=True, color='#666666', size='xs', flex=5)
-                            ]
-                        )
-                    ]
-                )
-            ]
-        ),
-        footer=BoxComponent(
-            layout='vertical',
-            contents=[
-                TextComponent(text="資料來源：蝦皮購物", size='xs', color='#cccccc', align='center')
-            ]
-        )
-    )
-    return FlexSendMessage(alt_text=f"物流狀態: {data['status']}", contents=bubble)
-
-@app.route("/", methods=['GET'])
-def hello():
-    return "Shopee Bot is running!"
-
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers['X-Line-Signature']
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-    return 'OK'
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_text = event.message.text.strip().upper()
-    
-    # 簡易判斷：通常蝦皮單號包含 TW 或 長度大於 10
-    if len(user_text) >= 10:
-        result = get_shopee_tracking(user_text)
-        if result["success"]:
-            line_bot_api.reply_message(event.reply_token, create_flex_message(result))
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result["msg"]))
-
-# 這是 Vercel 需要的進入點
-def handler_entry(request):
-    return app(request)
+            # 如果 API 有回傳訊息就顯示，否則顯示預設
+            error_msg = data.get("message", "查無此單號，請確認輸入是否正確")
+            return {"success": False, "msg": f"⚠️ {error_msg}"}
+            
+    except Exception as e:
+        print(f"錯誤詳情: {str(e)}")
+        return {"success": False, "msg": "❌ 連線失敗，可能蝦皮正在維護中"}
