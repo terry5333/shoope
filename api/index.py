@@ -8,35 +8,26 @@ from linebot.models import (
     FlexSendMessage, BubbleContainer, TextComponent, BoxComponent
 )
 
-# --- 核心重點：Vercel 會尋找這個在最外層的 app 變數 ---
 app = Flask(__name__)
 
-# 從環境變數取得 Line 密鑰
+# Line 設定
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# --- 重要：請在這裡填入你的 GAS 網址 ---
+GAS_URL = "https://script.google.com/macros/s/AKfycbw7XZr5X9wQWLsJJl40vJo78Hj8trLVIyjf1aQEYOu8JJ4jH9yB5DUtXnCMNWZ6JqeaqQ/exec" 
+
 def get_shopee_tracking(tracking_no):
-    """ 爬取蝦皮店到店(SPX)物流資訊 """
-    url = "https://spx.tw/api/v2/fleet_order/tracking_search"
-    params = {
-        "sls_tracking_number": tracking_no,
-        "device_id": "line-bot-query" 
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-        "Referer": f"https://spx.tw/detail/{tracking_no}",
-        "Accept": "application/json, text/plain, */*",
-        "X-Requested-With": "XMLHttpRequest"
-    }
-    
+    """ 透過 GAS 跳板抓取蝦皮資料 """
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        # 呼叫 GAS，讓 Google 幫我們去爬蝦皮
+        response = requests.get(f"{GAS_URL}?no={tracking_no}", timeout=15)
         
         if response.status_code != 200:
-            return {"success": False, "msg": f"❌ 蝦皮伺服器回應錯誤 (代碼: {response.status_code})"}
+            return {"success": False, "msg": "❌ 跳板伺服器異常"}
             
         data = response.json()
         
@@ -49,12 +40,12 @@ def get_shopee_tracking(tracking_no):
                 "no": tracking_no
             }
         else:
-            error_msg = data.get("message", "查無此單號，請確認輸入是否正確")
-            return {"success": False, "msg": f"⚠️ {error_msg}"}
+            msg = data.get("message", "查無此單號或格式不支援")
+            return {"success": False, "msg": f"⚠️ {msg}"}
             
     except Exception as e:
-        print(f"錯誤詳情: {str(e)}")
-        return {"success": False, "msg": "❌ 連線失敗，請稍後再試"}
+        print(f"Error: {str(e)}")
+        return {"success": False, "msg": "❌ 連線超時，請稍後再試"}
 
 def create_flex_message(data):
     """ 產生 Line Flex Message 卡片 """
@@ -64,49 +55,33 @@ def create_flex_message(data):
             contents=[
                 TextComponent(text="📦 物流追蹤結果", weight='bold', size='xl', color='#EE4D2D'),
                 BoxComponent(
-                    layout='vertical',
-                    margin='lg',
+                    layout='vertical', margin='lg',
                     contents=[
-                        BoxComponent(
-                            layout='baseline',
-                            spacing='sm',
-                            contents=[
-                                TextComponent(text='單號', color='#aaaaaa', size='sm', flex=1),
-                                TextComponent(text=data['no'], wrap=True, color='#666666', size='sm', flex=5)
-                            ]
-                        ),
-                        BoxComponent(
-                            layout='baseline',
-                            spacing='sm',
-                            contents=[
-                                TextComponent(text='狀態', color='#aaaaaa', size='sm', flex=1),
-                                TextComponent(text=data['status'], wrap=True, color='#333333', size='md', flex=5, weight='bold')
-                            ]
-                        ),
-                        BoxComponent(
-                            layout='baseline',
-                            spacing='sm',
-                            contents=[
-                                TextComponent(text='時間', color='#aaaaaa', size='sm', flex=1),
-                                TextComponent(text=data['time'], wrap=True, color='#666666', size='xs', flex=5)
-                            ]
-                        )
+                        BoxComponent(layout='baseline', spacing='sm', contents=[
+                            TextComponent(text='單號', color='#aaaaaa', size='sm', flex=1),
+                            TextComponent(text=data['no'], wrap=True, color='#666666', size='sm', flex=5)
+                        ]),
+                        BoxComponent(layout='baseline', spacing='sm', contents=[
+                            TextComponent(text='狀態', color='#aaaaaa', size='sm', flex=1),
+                            TextComponent(text=data['status'], wrap=True, color='#333333', size='md', flex=5, weight='bold')
+                        ]),
+                        BoxComponent(layout='baseline', spacing='sm', contents=[
+                            TextComponent(text='時間', color='#aaaaaa', size='sm', flex=1),
+                            TextComponent(text=data['time'], wrap=True, color='#666666', size='xs', flex=5)
+                        ])
                     ]
                 )
             ]
         ),
-        footer=BoxComponent(
-            layout='vertical',
-            contents=[
-                TextComponent(text="資料來源：蝦皮購物", size='xs', color='#cccccc', align='center')
-            ]
-        )
+        footer=BoxComponent(layout='vertical', contents=[
+            TextComponent(text="資料來源：蝦皮購物 (GAS Proxy)", size='xs', color='#cccccc', align='center')
+        ])
     )
     return FlexSendMessage(alt_text=f"物流狀態: {data['status']}", contents=bubble)
 
 @app.route("/", methods=['GET'])
 def home():
-    return "Line Bot is running successfully!"
+    return "Shopee Proxy Bot is Running!"
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -121,8 +96,7 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip().upper()
-    
-    # 只要輸入長度大於等於 10 個字元，就當作單號去查詢
+    # 只要長度大於等於 10 就執行查詢
     if len(user_text) >= 10:
         result = get_shopee_tracking(user_text)
         if result["success"]:
@@ -130,3 +104,5 @@ def handle_message(event):
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result["msg"]))
 
+if __name__ == "__main__":
+    app.run()
